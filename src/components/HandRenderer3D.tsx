@@ -1,15 +1,14 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import type { HandLandmarks } from "@/lib/handTracking";
+import type { TrackedHand } from "@/hooks/useHandTracker";
 import { HAND_CONNECTIONS } from "@/lib/gestures";
 
 interface Props {
-  landmarks: HandLandmarks | null;
+  hands: TrackedHand[];
   handshake: boolean;
   mode: "3d" | "skeleton";
 }
 
-// Convert MediaPipe normalized coords to Three world coords (mirror X for selfie)
 function lmToVec3(lm: { x: number; y: number; z: number }, scale = 4) {
   return new THREE.Vector3(
     -(lm.x - 0.5) * scale,
@@ -18,36 +17,93 @@ function lmToVec3(lm: { x: number; y: number; z: number }, scale = 4) {
   );
 }
 
-export function HandRenderer3D({ landmarks, handshake, mode }: Props) {
+type HandRig = {
+  group: THREE.Group;
+  joints: THREE.Mesh[];
+  bones: THREE.Mesh[];
+  palm: THREE.Mesh;
+  jointMat: THREE.MeshPhysicalMaterial;
+  tipMat: THREE.MeshPhysicalMaterial;
+};
+
+function buildHandRig(palette: { joint: number; tip: number; bone: number; palm: number }): HandRig {
+  const group = new THREE.Group();
+  const jointMat = new THREE.MeshPhysicalMaterial({
+    color: palette.joint,
+    emissive: palette.joint,
+    emissiveIntensity: 0.4,
+    roughness: 0.25,
+    metalness: 0.3,
+    clearcoat: 0.6,
+  });
+  const tipMat = new THREE.MeshPhysicalMaterial({
+    color: palette.tip,
+    emissive: palette.tip,
+    emissiveIntensity: 0.5,
+    roughness: 0.2,
+    metalness: 0.4,
+    clearcoat: 0.8,
+  });
+  const boneMat = new THREE.MeshPhysicalMaterial({
+    color: palette.bone,
+    emissive: palette.bone,
+    emissiveIntensity: 0.25,
+    roughness: 0.4,
+    metalness: 0.6,
+  });
+  const tipIndices = new Set([4, 8, 12, 16, 20]);
+  const joints: THREE.Mesh[] = [];
+  for (let i = 0; i < 21; i++) {
+    const isTip = tipIndices.has(i);
+    const isWrist = i === 0;
+    const r = isWrist ? 0.16 : isTip ? 0.11 : 0.085;
+    const geo = new THREE.SphereGeometry(r, 24, 24);
+    const m = new THREE.Mesh(geo, isTip ? tipMat : jointMat);
+    group.add(m);
+    joints.push(m);
+  }
+  const bones: THREE.Mesh[] = HAND_CONNECTIONS.map(() => {
+    const geo = new THREE.CylinderGeometry(0.045, 0.045, 1, 16);
+    geo.translate(0, 0.5, 0);
+    const m = new THREE.Mesh(geo, boneMat);
+    group.add(m);
+    return m;
+  });
+  const palmGeo = new THREE.CircleGeometry(0.5, 32);
+  const palmMat = new THREE.MeshBasicMaterial({
+    color: palette.palm,
+    transparent: true,
+    opacity: 0.1,
+    side: THREE.DoubleSide,
+  });
+  const palm = new THREE.Mesh(palmGeo, palmMat);
+  group.add(palm);
+  group.visible = false;
+  return { group, joints, bones, palm, jointMat, tipMat };
+}
+
+export function HandRenderer3D({ hands, handshake, mode }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<{
     renderer?: THREE.WebGLRenderer;
     scene?: THREE.Scene;
     camera?: THREE.PerspectiveCamera;
-    joints: THREE.Mesh[];
-    bones: THREE.Mesh[];
-    palm?: THREE.Mesh;
-    group?: THREE.Group;
+    rigs: HandRig[];
     raf?: number;
-    landmarks: HandLandmarks | null;
+    hands: TrackedHand[];
     handshake: boolean;
     mode: "3d" | "skeleton";
     shakeT: number;
-  }>({ joints: [], bones: [], landmarks: null, handshake: false, mode: "3d", shakeT: 0 });
+  }>({ rigs: [], hands: [], handshake: false, mode: "3d", shakeT: 0 });
 
-  // keep ref synced with prop changes (no re-init)
   useEffect(() => {
-    stateRef.current.landmarks = landmarks;
-  }, [landmarks]);
+    stateRef.current.hands = hands;
+  }, [hands]);
   useEffect(() => {
     stateRef.current.handshake = handshake;
   }, [handshake]);
   useEffect(() => {
     stateRef.current.mode = mode;
-    // toggle materials
-    const s = stateRef.current;
-    s.joints.forEach((m) => (m.visible = true));
-    if (s.palm) s.palm.visible = mode === "3d";
   }, [mode]);
 
   useEffect(() => {
@@ -65,7 +121,6 @@ export function HandRenderer3D({ landmarks, handshake, mode }: Props) {
     renderer.setClearColor(0x000000, 0);
     container.appendChild(renderer.domElement);
 
-    // Lights
     const ambient = new THREE.AmbientLight(0xffffff, 0.55);
     scene.add(ambient);
     const key = new THREE.DirectionalLight(0x6ee7ff, 1.2);
@@ -75,81 +130,17 @@ export function HandRenderer3D({ landmarks, handshake, mode }: Props) {
     rim.position.set(-3, -2, 2);
     scene.add(rim);
 
-    const group = new THREE.Group();
-    scene.add(group);
-
-    // Joints (21 spheres)
-    const jointMat = new THREE.MeshPhysicalMaterial({
-      color: 0x6ee7ff,
-      emissive: 0x1a8aa3,
-      emissiveIntensity: 0.4,
-      roughness: 0.25,
-      metalness: 0.3,
-      clearcoat: 0.6,
-    });
-    const tipMat = new THREE.MeshPhysicalMaterial({
-      color: 0xff6ed8,
-      emissive: 0x6a2a55,
-      emissiveIntensity: 0.5,
-      roughness: 0.2,
-      metalness: 0.4,
-      clearcoat: 0.8,
-    });
-    const tipIndices = new Set([4, 8, 12, 16, 20]);
-    const joints: THREE.Mesh[] = [];
-    for (let i = 0; i < 21; i++) {
-      const isTip = tipIndices.has(i);
-      const isWrist = i === 0;
-      const r = isWrist ? 0.16 : isTip ? 0.11 : 0.085;
-      const geo = new THREE.SphereGeometry(r, 24, 24);
-      const m = new THREE.Mesh(geo, isTip ? tipMat : jointMat);
-      group.add(m);
-      joints.push(m);
-    }
-
-    // Bones (cylinders aligned between connected joints)
-    const boneMat = new THREE.MeshPhysicalMaterial({
-      color: 0xffffff,
-      emissive: 0x2a6f80,
-      emissiveIntensity: 0.3,
-      roughness: 0.4,
-      metalness: 0.6,
-    });
-    const bones: THREE.Mesh[] = HAND_CONNECTIONS.map(() => {
-      const geo = new THREE.CylinderGeometry(0.045, 0.045, 1, 16);
-      geo.translate(0, 0.5, 0); // pivot at base
-      const m = new THREE.Mesh(geo, boneMat);
-      group.add(m);
-      return m;
-    });
-
-    // Palm plane (subtle)
-    const palmGeo = new THREE.CircleGeometry(0.5, 32);
-    const palmMat = new THREE.MeshBasicMaterial({
-      color: 0x6ee7ff,
-      transparent: true,
-      opacity: 0.08,
-      side: THREE.DoubleSide,
-    });
-    const palm = new THREE.Mesh(palmGeo, palmMat);
-    group.add(palm);
-
-    // Idle hand pose so something shows before tracking
-    const idlePose: HandLandmarks = Array.from({ length: 21 }, (_, i) => ({
-      x: 0.5 + Math.cos(i * 0.3) * 0.15,
-      y: 0.5 + Math.sin(i * 0.3) * 0.15,
-      z: 0,
-    }));
+    // Two rigs with distinct palettes (cyan / magenta)
+    const rigA = buildHandRig({ joint: 0x6ee7ff, tip: 0x00d4ff, bone: 0x3aa9c4, palm: 0x6ee7ff });
+    const rigB = buildHandRig({ joint: 0xff6ed8, tip: 0xff3ec0, bone: 0xc44aa0, palm: 0xff6ed8 });
+    scene.add(rigA.group, rigB.group);
 
     stateRef.current = {
       renderer,
       scene,
       camera,
-      joints,
-      bones,
-      palm,
-      group,
-      landmarks: null,
+      rigs: [rigA, rigB],
+      hands: [],
       handshake: false,
       mode: "3d",
       shakeT: 0,
@@ -162,61 +153,59 @@ export function HandRenderer3D({ landmarks, handshake, mode }: Props) {
 
     const animate = () => {
       const s = stateRef.current;
-      const lm = s.landmarks ?? idlePose;
 
-      // Base pose
-      const positions = lm.map((p) => lmToVec3(p));
-      // Position joints
-      for (let i = 0; i < positions.length; i++) {
-        s.joints[i].position.copy(positions[i]);
-      }
-      // Position bones
-      for (let i = 0; i < HAND_CONNECTIONS.length; i++) {
-        const [a, b] = HAND_CONNECTIONS[i];
-        tmpA.copy(positions[a]);
-        tmpB.copy(positions[b]);
-        const dir = tmpB.clone().sub(tmpA);
-        const len = dir.length();
-        const bone = s.bones[i];
-        bone.position.copy(tmpA);
-        bone.scale.set(1, len, 1);
-        q.setFromUnitVectors(up, dir.normalize());
-        bone.quaternion.copy(q);
-        bone.visible = s.mode === "3d" || s.mode === "skeleton";
-      }
-      // Palm follows wrist->middle MCP
-      if (s.palm) {
+      for (let h = 0; h < s.rigs.length; h++) {
+        const rig = s.rigs[h];
+        const tracked = s.hands[h];
+        if (!tracked) {
+          rig.group.visible = false;
+          continue;
+        }
+        rig.group.visible = true;
+
+        const positions = tracked.landmarks.map((p) => lmToVec3(p));
+        for (let i = 0; i < positions.length; i++) {
+          rig.joints[i].position.copy(positions[i]);
+        }
+        for (let i = 0; i < HAND_CONNECTIONS.length; i++) {
+          const [a, b] = HAND_CONNECTIONS[i];
+          tmpA.copy(positions[a]);
+          tmpB.copy(positions[b]);
+          const dir = tmpB.clone().sub(tmpA);
+          const len = dir.length();
+          const bone = rig.bones[i];
+          bone.position.copy(tmpA);
+          bone.scale.set(1, len, 1);
+          q.setFromUnitVectors(up, dir.normalize());
+          bone.quaternion.copy(q);
+        }
         const w = positions[0];
         const m = positions[9];
-        s.palm.position.copy(w.clone().add(m).multiplyScalar(0.5));
-        s.palm.lookAt(s.camera!.position);
-        s.palm.visible = s.mode === "3d";
+        rig.palm.position.copy(w.clone().add(m).multiplyScalar(0.5));
+        rig.palm.lookAt(s.camera!.position);
+        rig.palm.visible = s.mode === "3d";
+
+        rig.bones.forEach((b) => {
+          (b.material as THREE.MeshPhysicalMaterial).emissiveIntensity =
+            s.mode === "skeleton" ? 0.9 : 0.3;
+        });
+
+        if (s.handshake) {
+          rig.jointMat.emissiveIntensity = 1.2;
+          rig.tipMat.emissiveIntensity = 1.4;
+        } else {
+          rig.jointMat.emissiveIntensity = 0.45;
+          rig.tipMat.emissiveIntensity = 0.55;
+        }
       }
 
-      // Mode toggling for joints/bones color emphasis
-      s.bones.forEach((b) => {
-        (b.material as THREE.MeshPhysicalMaterial).emissiveIntensity =
-          s.mode === "skeleton" ? 0.9 : 0.3;
-      });
-
-      // Handshake feedback
+      // Group pulse on handshake
       if (s.handshake) {
         s.shakeT += 0.25;
-        const pulse = 1 + Math.sin(s.shakeT * 3) * 0.06;
-        s.group!.scale.setScalar(pulse);
-        (jointMat as THREE.MeshPhysicalMaterial).emissiveIntensity = 1.2;
-        (tipMat as THREE.MeshPhysicalMaterial).emissiveIntensity = 1.4;
+        const pulse = 1 + Math.sin(s.shakeT * 3) * 0.05;
+        s.rigs.forEach((r) => r.group.scale.setScalar(pulse));
       } else {
-        s.group!.scale.lerp(new THREE.Vector3(1, 1, 1), 0.15);
-        (jointMat as THREE.MeshPhysicalMaterial).emissiveIntensity = 0.4;
-        (tipMat as THREE.MeshPhysicalMaterial).emissiveIntensity = 0.5;
-      }
-
-      // Subtle idle rotation when no hand
-      if (!s.landmarks) {
-        s.group!.rotation.y += 0.005;
-      } else {
-        s.group!.rotation.y *= 0.92;
+        s.rigs.forEach((r) => r.group.scale.lerp(new THREE.Vector3(1, 1, 1), 0.15));
       }
 
       s.renderer!.render(s.scene!, s.camera!);

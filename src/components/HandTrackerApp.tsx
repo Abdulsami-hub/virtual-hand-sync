@@ -24,22 +24,23 @@ const STATUS_COLOR: Record<string, string> = {
 };
 
 export function HandTrackerApp() {
-  const { videoRef, status, landmarks, error, fps, start, stop } = useHandTracker();
+  const { videoRef, status, hands, error, fps, start, stop } = useHandTracker();
   const [showVideo, setShowVideo] = useState(true);
   const [mode, setMode] = useState<"3d" | "skeleton">("3d");
-  const [gesture, setGesture] = useState<Gesture>("unknown");
+  const [gestures, setGestures] = useState<Gesture[]>([]);
   const [handshake, setHandshake] = useState(false);
   const [shakeCount, setShakeCount] = useState(0);
   const detectorRef = useRef(new HandshakeDetector());
   const handshakeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!landmarks) {
-      setGesture("unknown");
+    if (hands.length === 0) {
+      setGestures([]);
       return;
     }
-    setGesture(detectGesture(landmarks));
-    const wristY = landmarks[0].y;
+    setGestures(hands.map((h) => detectGesture(h.landmarks)));
+    // Use first hand's wrist for handshake detection
+    const wristY = hands[0].landmarks[0].y;
     const triggered = detectorRef.current.push(wristY, performance.now());
     if (triggered) {
       setHandshake(true);
@@ -48,160 +49,159 @@ export function HandTrackerApp() {
       if (handshakeTimerRef.current) window.clearTimeout(handshakeTimerRef.current);
       handshakeTimerRef.current = window.setTimeout(() => setHandshake(false), 1400);
     }
-  }, [landmarks]);
+  }, [hands]);
 
   const isOn = status !== "idle" && status !== "error";
   const statusText = useMemo(() => STATUS_LABEL[status] ?? status, [status]);
   const statusDot = STATUS_COLOR[status] ?? "bg-muted-foreground";
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Header */}
-      <header className="border-b border-border/50 glass">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-gradient-to-br from-primary to-accent glow-primary">
-              <Hand className="w-5 h-5 text-primary-foreground" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-tight gradient-text">
-                Hand Mirror
-              </h1>
-              <p className="text-xs text-muted-foreground">
-                Real-time AR hand tracking
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Activity className="w-3.5 h-3.5" />
-            <span className="tabular-nums">{fps} fps</span>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen relative">
+      {/* Fullscreen camera background */}
+      <video
+        ref={videoRef}
+        className={`fixed inset-0 w-full h-full object-cover scale-x-[-1] -z-10 transition-opacity duration-500 ${
+          showVideo && isOn ? "opacity-100" : "opacity-0"
+        }`}
+        playsInline
+        muted
+      />
+      {/* Dark overlay for readability */}
+      <div className="fixed inset-0 -z-10 bg-gradient-to-b from-background/70 via-background/40 to-background/80" />
 
-      <main className="flex-1 container mx-auto px-4 py-6 flex flex-col gap-6">
-        {/* Status bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3 glass rounded-full px-4 py-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${statusDot}`} />
-            <span className="text-sm font-medium">{statusText}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground hidden sm:inline">
-              Gesture
-            </span>
-            <span className="glass rounded-full px-3 py-1.5 text-sm font-semibold capitalize min-w-[90px] text-center">
-              {gesture}
-            </span>
-            <span className="glass rounded-full px-3 py-1.5 text-sm font-semibold">
-              🤝 {shakeCount}
-            </span>
-          </div>
-        </div>
+      {/* 3D hands overlay — fullscreen, on top of camera */}
+      <div className="fixed inset-0 pointer-events-none">
+        <HandRenderer3D hands={hands} handshake={handshake} mode={mode} />
+      </div>
 
-        {/* Stage */}
-        <div className="relative flex-1 min-h-[480px] rounded-3xl glass overflow-hidden shadow-[var(--shadow-elegant)]">
-          {/* 3D canvas */}
-          <HandRenderer3D landmarks={landmarks} handshake={handshake} mode={mode} />
-
-          {/* Video preview (PIP) */}
-          <div
-            className={`absolute top-4 right-4 w-40 sm:w-56 aspect-video rounded-xl overflow-hidden border border-border/60 shadow-lg transition-opacity ${
-              showVideo && isOn ? "opacity-100" : "opacity-0 pointer-events-none"
-            }`}
-          >
-            <video
-              ref={videoRef}
-              className="w-full h-full object-cover scale-x-[-1] bg-black"
-              playsInline
-              muted
-            />
-          </div>
-
-          {/* Always-mounted hidden video when preview off */}
-          {!showVideo && (
-            <video
-              ref={videoRef}
-              className="hidden"
-              playsInline
-              muted
-            />
-          )}
-
-          {/* Handshake overlay */}
-          {handshake && (
-            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-              <div className="px-6 py-3 rounded-2xl bg-gradient-to-r from-primary to-accent text-primary-foreground font-bold text-lg shadow-2xl animate-shake-pulse">
-                🤝 Handshake!
+      <div className="relative z-10 min-h-screen flex flex-col">
+        {/* Header */}
+        <header className="border-b border-border/30 glass">
+          <div className="container mx-auto px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-gradient-to-br from-primary to-accent glow-primary">
+                <Hand className="w-5 h-5 text-primary-foreground" />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold tracking-tight gradient-text">
+                  Hand Mirror
+                </h1>
+                <p className="text-xs text-muted-foreground">
+                  Real-time AR hand tracking
+                </p>
               </div>
             </div>
-          )}
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Activity className="w-3.5 h-3.5" />
+              <span className="tabular-nums">{fps} fps</span>
+            </div>
+          </div>
+        </header>
 
-          {/* Empty state */}
+        <main className="flex-1 container mx-auto px-4 py-4 flex flex-col gap-4">
+          {/* Status bar */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3 glass rounded-full px-4 py-2">
+              <span className={`w-2.5 h-2.5 rounded-full ${statusDot}`} />
+              <span className="text-sm font-medium">{statusText}</span>
+              {hands.length > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  · {hands.length} hand{hands.length > 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {gestures.map((g, i) => (
+                <span
+                  key={i}
+                  className="glass rounded-full px-3 py-1.5 text-xs font-semibold capitalize"
+                >
+                  <span
+                    className={`inline-block w-2 h-2 rounded-full mr-2 ${
+                      i === 0 ? "bg-primary" : "bg-accent"
+                    }`}
+                  />
+                  {hands[i]?.handedness ?? "Hand"}: {g}
+                </span>
+              ))}
+              <span className="glass rounded-full px-3 py-1.5 text-sm font-semibold">
+                🤝 {shakeCount}
+              </span>
+            </div>
+          </div>
+
+          {/* Spacer to let the 3D hands shine through */}
+          <div className="flex-1" />
+
+          {/* Empty state when idle */}
           {status === "idle" && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-center px-6 pointer-events-none">
+            <div className="flex flex-col items-center justify-center gap-4 text-center py-12 glass rounded-3xl pointer-events-auto">
               <div className="w-20 h-20 rounded-2xl flex items-center justify-center bg-gradient-to-br from-primary/20 to-accent/20 border border-border/50">
                 <Camera className="w-10 h-10 text-primary" />
               </div>
               <div>
                 <h2 className="text-xl font-semibold">Start your camera</h2>
                 <p className="text-sm text-muted-foreground mt-1 max-w-sm">
-                  Show your hand to the webcam — a 3D mirror will follow every move.
+                  Show both hands to the webcam — two 3D mirrors will follow every move.
                 </p>
               </div>
             </div>
           )}
 
           {error && (
-            <div className="absolute bottom-4 left-4 right-4 glass rounded-xl p-3 text-sm text-destructive">
+            <div className="glass rounded-xl p-3 text-sm text-destructive">
               {error}
             </div>
           )}
-        </div>
 
-        {/* Controls */}
-        <div className="flex flex-wrap items-center justify-center gap-3">
-          {!isOn ? (
-            <Button
-              size="lg"
-              onClick={start}
-              className="bg-gradient-to-r from-primary to-accent text-primary-foreground hover:opacity-90 shadow-[var(--shadow-glow)] font-semibold"
-            >
-              <Camera className="w-4 h-4 mr-2" />
-              Start camera
-            </Button>
-          ) : (
-            <Button size="lg" variant="destructive" onClick={stop}>
-              <CameraOff className="w-4 h-4 mr-2" />
-              Stop camera
-            </Button>
+          {/* Handshake overlay */}
+          {handshake && (
+            <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-20">
+              <div className="px-6 py-3 rounded-2xl bg-gradient-to-r from-primary to-accent text-primary-foreground font-bold text-lg shadow-2xl animate-shake-pulse">
+                🤝 Handshake!
+              </div>
+            </div>
           )}
 
-          <Button
-            size="lg"
-            variant="secondary"
-            onClick={() => setShowVideo((v) => !v)}
-            disabled={!isOn}
-          >
-            {showVideo ? <EyeOff className="w-4 h-4 mr-2" /> : <Eye className="w-4 h-4 mr-2" />}
-            {showVideo ? "Hide preview" : "Show preview"}
-          </Button>
+          {/* Controls */}
+          <div className="flex flex-wrap items-center justify-center gap-3 pb-4">
+            {!isOn ? (
+              <Button
+                size="lg"
+                onClick={start}
+                className="bg-gradient-to-r from-primary to-accent text-primary-foreground hover:opacity-90 shadow-[var(--shadow-glow)] font-semibold"
+              >
+                <Camera className="w-4 h-4 mr-2" />
+                Start camera
+              </Button>
+            ) : (
+              <Button size="lg" variant="destructive" onClick={stop}>
+                <CameraOff className="w-4 h-4 mr-2" />
+                Stop camera
+              </Button>
+            )}
 
-          <Button
-            size="lg"
-            variant="secondary"
-            onClick={() => setMode((m) => (m === "3d" ? "skeleton" : "3d"))}
-          >
-            <Boxes className="w-4 h-4 mr-2" />
-            {mode === "3d" ? "Skeleton view" : "3D hand view"}
-          </Button>
-        </div>
+            <Button
+              size="lg"
+              variant="secondary"
+              onClick={() => setShowVideo((v) => !v)}
+              disabled={!isOn}
+            >
+              {showVideo ? <EyeOff className="w-4 h-4 mr-2" /> : <Eye className="w-4 h-4 mr-2" />}
+              {showVideo ? "Hide camera" : "Show camera"}
+            </Button>
 
-        <p className="text-center text-xs text-muted-foreground max-w-2xl mx-auto">
-          Tip: shake your hand up and down to trigger a handshake. Gestures detected:
-          open hand, fist, point, peace.
-        </p>
-      </main>
+            <Button
+              size="lg"
+              variant="secondary"
+              onClick={() => setMode((m) => (m === "3d" ? "skeleton" : "3d"))}
+            >
+              <Boxes className="w-4 h-4 mr-2" />
+              {mode === "3d" ? "Skeleton view" : "3D hand view"}
+            </Button>
+          </div>
+        </main>
+      </div>
     </div>
   );
 }
