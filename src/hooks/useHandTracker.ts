@@ -7,6 +7,8 @@ import {
 import type { HandLandmarker } from "@mediapipe/tasks-vision";
 
 export type TrackerStatus = "idle" | "loading" | "ready" | "tracking" | "lost" | "error";
+export type Handedness = "Left" | "Right";
+export type TrackedHand = { landmarks: HandLandmarks; handedness: Handedness };
 
 export function useHandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -14,11 +16,15 @@ export function useHandTracker() {
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastVideoTimeRef = useRef(-1);
-  const smootherRef = useRef(new LandmarkSmoother());
+  // one smoother per hand slot (max 2)
+  const smoothersRef = useRef<LandmarkSmoother[]>([
+    new LandmarkSmoother(),
+    new LandmarkSmoother(),
+  ]);
   const lostFramesRef = useRef(0);
 
   const [status, setStatus] = useState<TrackerStatus>("idle");
-  const [landmarks, setLandmarks] = useState<HandLandmarks | null>(null);
+  const [hands, setHands] = useState<TrackedHand[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [fps, setFps] = useState(0);
   const fpsRef = useRef({ frames: 0, last: performance.now() });
@@ -31,8 +37,8 @@ export function useHandTracker() {
       streamRef.current = null;
     }
     if (videoRef.current) videoRef.current.srcObject = null;
-    smootherRef.current.reset();
-    setLandmarks(null);
+    smoothersRef.current.forEach((s) => s.reset());
+    setHands([]);
     setStatus("idle");
   }, []);
 
@@ -66,19 +72,26 @@ export function useHandTracker() {
           lastVideoTimeRef.current = v.currentTime;
           const result = lm.detectForVideo(v, t);
           if (result.landmarks && result.landmarks.length > 0) {
-            const smoothed = smootherRef.current.smooth(result.landmarks[0], t);
-            setLandmarks(smoothed);
+            const tracked: TrackedHand[] = result.landmarks
+              .slice(0, 2)
+              .map((points, i) => ({
+                landmarks: smoothersRef.current[i].smooth(points, t),
+                handedness:
+                  (result.handednesses?.[i]?.[0]?.categoryName as Handedness) ?? "Right",
+              }));
+            // reset unused smoother
+            if (tracked.length < 2) smoothersRef.current[1].reset();
+            setHands(tracked);
             lostFramesRef.current = 0;
             setStatus("tracking");
           } else {
             lostFramesRef.current++;
             if (lostFramesRef.current > 10) {
-              setLandmarks(null);
+              setHands([]);
               setStatus("lost");
-              smootherRef.current.reset();
+              smoothersRef.current.forEach((s) => s.reset());
             }
           }
-          // FPS
           fpsRef.current.frames++;
           if (t - fpsRef.current.last >= 1000) {
             setFps(fpsRef.current.frames);
@@ -98,5 +111,5 @@ export function useHandTracker() {
 
   useEffect(() => () => stop(), [stop]);
 
-  return { videoRef, status, landmarks, error, fps, start, stop };
+  return { videoRef, status, hands, error, fps, start, stop };
 }
